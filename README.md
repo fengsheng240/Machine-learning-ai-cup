@@ -11,15 +11,78 @@
 本次競賽的目標是運用由智慧桌球拍所蒐集的揮拍數據，透過 AI 模型來預測選手的四項屬性，包括：性別、慣用手、打球年資、球技等級。<br>
 而我將本次競賽的實作過程簡單分為以下幾個部份去講解:<br>
 
+## 📌專案結構/檔案用途<br>
+| 檔案名稱 | 用途說明 |
+|:---|:---|
+| tabular_data_train| 特徵工程產生的訓練集數值特徵（由 feature_engineering.py 轉換而來）|
+| tabular_data_test| 特徵工程產生的測試集數值特徵（由 feature_engineering.py 轉換而來）|
+| feature_engineering.py | 官方 baseline 特徵工程程式碼，將感測器原始 txt 資料轉換為特徵值|
+| main2.py |主程式，呼叫 model_utils.py 與模型進行訓練，並輸出 submission.csv |
+| model_utils.py |資料聚合程式碼：將每位球員的 27 筆資料壓縮成 1 筆最終預測，用於 submission |
+| submission777.csv |提交至比賽官網的預測結果檔案 |
+| train_data.zip|原始訓練感測器數據（txt 檔，每位球員一個檔案） |
+| test_data.zip|原始測試感測器數據 |
+| train_info.csv |訓練資料對應表，包含每位球員的性別、慣用手、球齡、程度等標籤 |
+| test_info.csv |測試資料對應表，僅包含球員編號，需預測標籤 |
+
+<br>
+
 ### 1.資料探索（EDA, Exploratory Data Analysis）
+每位球員對應一個 txt 檔，內含數千筆時間序列數據。
+- 每行包含 6 個數值：`ax, ay, az, gx, gy, gz`。
+- 這些數據代表球員在揮拍過程中的加速度與角速度。
+
+<br>
 
 ### 2.資料前處理
+- 移除 txt 檔中的空行與不必要數據。  
+- 僅保留六維感測器數據 (ax, ay, az, gx, gy, gz)。  
+- 使用 **LabelEncoder** 將文字標籤 (性別、慣用手、球齡、等級) 轉為數值。  
+- 使用 **MinMaxScaler** 將所有特徵縮放至 [0,1] 區間。  
+
+<br>
 
 ### 3.特徵工程
+特徵工程的部分，因為我們目前無相關學習經驗，所以是直接使用官方提供的方法。
+- 每位球員的原始資料長度不一，官方 baseline 將每份資料 **等分為 27 段**。  
+- 在每一段資料上計算統計與頻域特徵：  
+  - 平均值 (mean)、標準差 (std)、均方根 (rms)、最大/最小值 (max/min)  
+  - 頻域能量 (FFT, PSD)、偏態 (skewness)、峰度 (kurtosis)、熵 (entropy)  
+- 最終每位球員會得到 **27 筆 × 34 維特徵**，存放於 `tabular_data_train/*.csv` 與 `tabular_data_test/*.csv`。 
+
+<br>
 
 ### 4.建模與驗證
+在官方提供的程式碼中是針對四個分類目標(二元分類目標:gender、hold racket handed，多元分類目標:play years、level)各自建立1個隨機森林模型，共4個。
+而我們針對二元、多元分類的目標使用不同的模型，並且建立了資料的切分、驗證、評估方法。
+- 二分類：針對 gender、hold racket handed ----> 使用 XGBoost (XGBClassifier)
+- 多分類：針對 play years、level ----> 使用 LightGBM (LGBMClassifier)
+- 交叉驗證：Stratified 10-fold CV，回報 AUC / ACC 平均。
+- 資料切分：先根據 player_id 做 hold-out 10%，其餘做 CV；避免同一球員資料同時出現在訓練與驗證。
+- 特徵縮放：MinMaxScaler（以訓練資料規則套用至驗證/測試）。
+- 評估：對 hold-out 集回報 AUC / ACC（二分類用 AUC；多分類用 OVR AUC）。
+
+<br>
 
 ### 5.資料聚合策略(預測與後處理)
+5.1.binary 任務（性別、持拍手） → aggregate_binary_prediction
+- 對 27 筆樣本分別算出 index=1 的機率。
+- 如果平均機率 > 0.5 → 選「機率最大」的樣本。
+- 如果平均機率 ≤ 0.5 → 選「機率最小」的樣本。
+- 回傳這筆樣本的 [index=0, index=1] 機率。
+
+5.2.多元分類任務（球齡、等級） → aggregate_multi_class_prediction
+- 對同一個球員的 27 筆特徵做 predict_proba → 得到 (27, n_class) 機率矩陣。
+- 先取平均機率 → 找出最可能的類別。
+- 再檢查這個類別在不同「分箱區間」（<0.25、0.25–0.5、0.5–0.75、≥0.75）中的分布，挑出一筆 代表性最強 (指的是在與平均機率落點相符的分箱區間裡，挑選機率最高的一筆樣本，作為該球員的最終代表預測。) 的樣本。
+- 如果該區間沒有樣本，則取最大機率的樣本。
+- 回傳這筆樣本的完整機率分佈，作為球員的最終預測。
+
+5.3.整合函式 → get_aggregated_preds_and_labels
+- 讀取 tabular_data_train/*.csv 或 tabular_data_test/*.csv 的每位球員特徵。
+- 先做 scaler 標準化，再丟進對應的模型。
+- 呼叫上述 binary / multi-class 聚合策略，得到「每位球員最終一筆預測」。
+- 同時收集真實標籤 (y_true) 與聚合後的預測機率 (y_pred)。
 
 <br>
 
