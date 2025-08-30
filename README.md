@@ -53,7 +53,7 @@
 
 <br>
 
-### 4.建模與驗證
+### 4.建立模型與驗證
 在官方提供的程式碼中是針對四個分類目標(二元分類目標:gender、hold racket handed，多元分類目標:play years、level)各自建立1個隨機森林模型，共4個。
 而我們針對二元、多元分類的目標使用不同的模型，並且建立了資料的切分、驗證、評估方法。
 - 二分類：針對 gender、hold racket handed ----> 使用 XGBoost (XGBClassifier)
